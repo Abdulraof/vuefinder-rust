@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::finder::{VueFinder, VueFinderConfig};
-use crate::router::finder_router;
+use crate::router::{finder_router, new_folder_handler};
 use crate::storages::StorageAdapter;
 
 #[derive(Clone)]
@@ -45,6 +45,10 @@ where
         self.app_data(web::JsonConfig::default().limit(config.json_limit))
             .app_data(web::PayloadConfig::default().limit(config.payload_limit))
             .app_data(vue_finder)
-            .service(web::resource(config.api_path).route(web::route().to(finder_router)))
+            .service(
+                web::scope(&config.api_path)
+                    .service(new_folder_handler)
+                    .service(web::resource("").route(web::route().to(finder_router))),
+            )
     }
 }

@@ -1,5 +1,5 @@
 use actix_multipart::Multipart;
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 
 use crate::payload::{
     ArchiveRequest, DeleteRequest, MoveRequest, NewFileRequest, NewFolderRequest, Query,
@@ -7,6 +7,15 @@ use crate::payload::{
 };
 
 use crate::finder::VueFinder;
+
+#[post("/create-folder")]
+pub async fn new_folder_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<NewFolderRequest>,
+) -> HttpResponse {
+    println!("Received new folder request: {:?}", payload.path);
+    VueFinder::new_folder(data, payload).await
+}
 
 pub async fn finder_router(
     req: HttpRequest,
@@ -36,15 +45,9 @@ pub async fn finder_router(
                         "Upload requests should use multipart/form-data",
                     )),
                 },
-                cmd @ ("newfolder" | "newfile" | "rename" | "move" | "delete" | "save"
-                | "archive" | "unarchive") => match payload {
+                cmd @ ("newfile" | "rename" | "move" | "delete" | "save" | "archive"
+                | "unarchive") => match payload {
                     web::Either::Left(json) => match cmd {
-                        "newfolder" => {
-                            let payload: NewFolderRequest =
-                                serde_json::from_value(json.into_inner())
-                                    .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::new_folder(data, query, web::Json(payload)).await)
-                        }
                         "newfile" => {
                             let payload: NewFileRequest = serde_json::from_value(json.into_inner())
                                 .map_err(actix_web::error::ErrorBadRequest)?;

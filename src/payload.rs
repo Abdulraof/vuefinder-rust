@@ -11,6 +11,7 @@ pub struct Query {
 #[derive(Deserialize)]
 pub struct NewFolderRequest {
     pub name: String,
+    pub path: String,
 }
 
 #[derive(Deserialize)]

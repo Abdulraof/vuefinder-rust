@@ -66,6 +66,17 @@ impl VueFinder {
         self.storages.keys().next().cloned().unwrap_or_default()
     }
 
+    /// Parses a storage name from a path URI like "storage-name://path"
+    fn parse_storage_name_from_path(&self, path: &str) -> Option<String> {
+        if let Some(pos) = path.find("://") {
+            let storage_name = &path[..pos];
+            if !storage_name.is_empty() && self.storages.contains_key(storage_name) {
+                return Some(storage_name.to_string());
+            }
+        }
+        None
+    }
+
     fn set_public_links(&self, node: &mut FileNode) {
         if let Some(public_links) = &self.config.public_links {
             if node.storage_item.node_type != "dir" {
@@ -287,25 +298,33 @@ impl VueFinder {
 
     pub async fn new_folder(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<NewFolderRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage_name = data.parse_storage_name_from_path(&payload.path);
+
+        let storage = match data.get_storage(storage_name.clone()) {
             Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "No storage adapters available"
+                }))
+            }
         };
 
-        let new_path = format!(
-            "{}/{}",
-            query.path.clone().unwrap_or_default(),
-            payload.name
-        );
+        let new_path = format!("{}/{}", payload.path, payload.name);
 
         match storage.create_dir(&new_path).await {
-            Ok(_) => Self::index(data, query).await,
+            Ok(_) => {
+                let query = web::Query(Query {
+                    q: "index".to_string(),
+                    adapter: storage_name,
+                    path: Some(payload.path.clone()),
+                    filter: None,
+                });
+                Self::index(data, query).await
+            }
+
             Err(e) => HttpResponse::InternalServerError().json(json!({
                 "status": false,
                 "message": e.to_string()
@@ -318,12 +337,14 @@ impl VueFinder {
         query: web::Query<Query>,
         payload: web::Json<NewFileRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage = match data.get_storage(query.adapter.clone()) {
             Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "No storage adapters available"
+                }))
+            }
         };
 
         let new_path = format!(
