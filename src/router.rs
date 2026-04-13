@@ -1,96 +1,115 @@
-use actix_multipart::Multipart;
-use actix_web::{post, web, HttpRequest, HttpResponse};
+use actix_multipart::form::MultipartForm;
+use actix_web::{get, post, web, HttpResponse};
 
 use crate::payload::{
-    ArchiveRequest, DeleteRequest, MoveRequest, NewFileRequest, NewFolderRequest, Query,
-    RenameRequest, SaveRequest, UnarchiveRequest,
+    ArchiveRequest, CopyRequest, DeleteRequest, MoveRequest, NewFileRequest, NewFolderRequest,
+    Query, RenameRequest, SaveRequest, SearchQuery, UnarchiveRequest, UploadForm,
 };
 
 use crate::finder::VueFinder;
+
+#[get("/")]
+pub async fn index_handler(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
+    VueFinder::index(data, query).await
+}
+
+#[get("/search")]
+pub async fn search_handler(
+    data: web::Data<VueFinder>,
+    query: web::Query<SearchQuery>,
+) -> HttpResponse {
+    VueFinder::search(data, query).await
+}
+
+#[get("/preview")]
+pub async fn preview_handler(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
+    VueFinder::preview(data, query).await
+}
+
+#[get("/download")]
+pub async fn download_handler(
+    data: web::Data<VueFinder>,
+    query: web::Query<Query>,
+) -> HttpResponse {
+    VueFinder::download(data, query).await
+}
 
 #[post("/create-folder")]
 pub async fn new_folder_handler(
     data: web::Data<VueFinder>,
     payload: web::Json<NewFolderRequest>,
 ) -> HttpResponse {
-    println!("Received new folder request: {:?}", payload.path);
     VueFinder::new_folder(data, payload).await
 }
 
-pub async fn finder_router(
-    req: HttpRequest,
+#[post("/create-file")]
+pub async fn new_file_handler(
     data: web::Data<VueFinder>,
-    query: web::Query<Query>,
-    payload: Option<web::Either<web::Json<serde_json::Value>, Multipart>>,
-) -> Result<HttpResponse, actix_web::Error> {
-    match *req.method() {
-        actix_web::http::Method::GET => match query.q.as_str() {
-            "index" => Ok(VueFinder::index(data, query).await),
-            "subfolders" => Ok(VueFinder::sub_folders(data, query).await),
-            "download" => Ok(VueFinder::download(data, query).await),
-            "preview" => Ok(VueFinder::preview(data, query).await),
-            "search" => Ok(VueFinder::search(data, query).await),
-            _ => Ok(HttpResponse::BadRequest().finish()),
-        },
-        actix_web::http::Method::POST => {
-            let payload = payload
-                .ok_or_else(|| actix_web::error::ErrorBadRequest("Missing request payload"))?;
+    payload: web::Json<NewFileRequest>,
+) -> HttpResponse {
+    VueFinder::new_file(data, payload).await
+}
 
-            match query.q.as_str() {
-                "upload" => match payload {
-                    web::Either::Right(multipart) => {
-                        Ok(VueFinder::upload(data, query, multipart).await)
-                    }
-                    _ => Err(actix_web::error::ErrorBadRequest(
-                        "Upload requests should use multipart/form-data",
-                    )),
-                },
-                cmd @ ("newfile" | "rename" | "move" | "delete" | "save" | "archive"
-                | "unarchive") => match payload {
-                    web::Either::Left(json) => match cmd {
-                        "newfile" => {
-                            let payload: NewFileRequest = serde_json::from_value(json.into_inner())
-                                .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::new_file(data, query, web::Json(payload)).await)
-                        }
-                        "rename" => {
-                            let payload: RenameRequest = serde_json::from_value(json.into_inner())
-                                .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::rename(data, query, web::Json(payload)).await)
-                        }
-                        "move" => {
-                            let payload: MoveRequest = serde_json::from_value(json.into_inner())
-                                .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::r#move(data, query, web::Json(payload)).await)
-                        }
-                        "delete" => {
-                            let payload: DeleteRequest = serde_json::from_value(json.into_inner())
-                                .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::delete(data, query, web::Json(payload)).await)
-                        }
-                        "save" => {
-                            let payload: SaveRequest = serde_json::from_value(json.into_inner())
-                                .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::save(data, query, web::Json(payload)).await)
-                        }
-                        "archive" => {
-                            let payload: ArchiveRequest = serde_json::from_value(json.into_inner())
-                                .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::archive(data, query, web::Json(payload)).await)
-                        }
-                        "unarchive" => {
-                            let payload: UnarchiveRequest =
-                                serde_json::from_value(json.into_inner())
-                                    .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::unarchive(data, query, web::Json(payload)).await)
-                        }
-                        _ => unreachable!(),
-                    },
-                    _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
-                },
-                _ => Ok(HttpResponse::BadRequest().finish()),
-            }
-        }
-        _ => Ok(HttpResponse::MethodNotAllowed().finish()),
-    }
+#[post("/rename")]
+pub async fn rename_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<RenameRequest>,
+) -> HttpResponse {
+    VueFinder::rename(data, payload).await
+}
+
+#[post("/move")]
+pub async fn move_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<MoveRequest>,
+) -> HttpResponse {
+    VueFinder::r#move(data, payload).await
+}
+
+#[post("/copy")]
+pub async fn copy_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<CopyRequest>,
+) -> HttpResponse {
+    VueFinder::copy(data, payload).await
+}
+
+#[post("/delete")]
+pub async fn delete_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<DeleteRequest>,
+) -> HttpResponse {
+    VueFinder::delete(data, payload).await
+}
+
+#[post("/upload")]
+pub async fn upload_handler(
+    data: web::Data<VueFinder>,
+    payload: MultipartForm<UploadForm>,
+) -> HttpResponse {
+    VueFinder::upload(data, payload).await
+}
+
+#[post("/archive")]
+pub async fn archive_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<ArchiveRequest>,
+) -> HttpResponse {
+    VueFinder::archive(data, payload).await
+}
+
+#[post("/unarchive")]
+pub async fn unarchive_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<UnarchiveRequest>,
+) -> HttpResponse {
+    VueFinder::unarchive(data, payload).await
+}
+
+#[post("/save")]
+pub async fn save_handler(
+    data: web::Data<VueFinder>,
+    payload: web::Json<SaveRequest>,
+) -> HttpResponse {
+    VueFinder::save(data, payload).await
 }
