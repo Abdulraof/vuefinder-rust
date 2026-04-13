@@ -1,6 +1,6 @@
 [package]
 name = "vuefinder"
-version = "0.1.2"
+version = "4.0.0"
 authors = ["boenfu"]
 description = "A Rust implementation of VueFinder file manager"
 edition = "2021"
@@ -26,7 +26,8 @@ binary = []
 [dependencies]
 # HTTP & Web
 actix-web = { version = "4.0", features = ["macros"] }
-actix-multipart = "0.4"
+actix-multipart = { version = "0.6", features = ["derive"] }
+tempfile = "3.8"
 actix-cors = "0.6"
 clap = { version = "4.4", features = ["derive"] }
 
