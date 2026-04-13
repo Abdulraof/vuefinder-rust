@@ -1,6 +1,5 @@
-use actix_multipart::Multipart;
+use actix_multipart::form::MultipartForm;
 use actix_web::{web, HttpResponse};
-use futures_util::TryStreamExt;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
@@ -11,8 +10,8 @@ use std::sync::Arc;
 use zip::{write::FileOptions, ZipWriter};
 
 use crate::payload::{
-    ArchiveRequest, DeleteRequest, MoveRequest, NewFileRequest, NewFolderRequest, Query,
-    RenameRequest, SaveRequest, UnarchiveRequest,
+    ArchiveRequest, CopyRequest, DeleteRequest, MoveRequest, NewFileRequest, NewFolderRequest,
+    Query, RenameRequest, SaveRequest, SearchQuery, UnarchiveRequest, UploadForm,
 };
 use crate::storages::StorageAdapter;
 use crate::storages::StorageItem;
@@ -99,24 +98,32 @@ impl VueFinder {
     }
 
     pub async fn index(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
-        let adapter = data.get_default_adapter(query.adapter.clone());
-        let dirname = query
-            .path
-            .clone()
-            .unwrap_or_else(|| format!("{}://", adapter));
+        let path = &query.path;
 
-        // Get directory contents
-        let storage = match data.get_storage(query.adapter.clone()) {
-            Some(s) => s,
+        // Parse storage name from path
+        let storage_name = match data.parse_storage_name_from_path(path) {
+            Some(name) => name,
             None => {
                 return HttpResponse::BadRequest().json(json!({
                     "status": false,
-                    "message": "No storage adapters available"
+                    "message": "Invalid path format. Path should include storage prefix (e.g., 'local://')."
                 }))
             }
         };
 
-        let list_contents = match storage.list_contents(&dirname).await {
+        // Get storage adapter
+        let storage = match data.storages.get(&storage_name) {
+            Some(s) => s,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
+        };
+
+        // Get directory contents
+        let list_contents = match storage.list_contents(path).await {
             Ok(contents) => contents,
             Err(e) => {
                 return HttpResponse::InternalServerError().json(json!({
@@ -141,18 +148,25 @@ impl VueFinder {
             .collect();
 
         HttpResponse::Ok().json(json!({
-            "adapter": adapter,
             "storages": data.storages.keys().collect::<Vec<_>>(),
-            "dirname": dirname,
-            "files": files
+            "dirname": path,
+            "files": files,
+            "read_only": false
         }))
     }
 
     pub async fn sub_folders(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
-        let adapter = data.get_default_adapter(query.adapter.clone());
-        let dirname = query.path.clone().unwrap_or_default();
+        let storage_name = match data.parse_storage_name_from_path(&query.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format."
+                }))
+            }
+        };
 
-        let storage = match data.storages.get(&adapter) {
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
             None => {
                 return HttpResponse::BadRequest().json(json!({
@@ -162,14 +176,13 @@ impl VueFinder {
             }
         };
 
-        match storage.list_contents(&dirname).await {
+        match storage.list_contents(&query.path).await {
             Ok(contents) => {
                 let folders: Vec<_> = contents
                     .into_iter()
                     .filter(|item| item.node_type == "dir")
                     .map(|item| {
                         json!({
-                            "adapter": adapter,
                             "path": item.path,
                             "basename": item.basename,
                         })
@@ -186,23 +199,24 @@ impl VueFinder {
     }
 
     pub async fn download(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage_name = match data.parse_storage_name_from_path(&query.path) {
+            Some(name) => name,
+            None => return HttpResponse::BadRequest().finish(),
+        };
+
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        match storage.read(&query.path.clone().unwrap_or_default()).await {
+        match storage.read(&query.path).await {
             Ok(contents) => {
-                let path = query.path.clone().unwrap_or_default();
-                let filename = Path::new(&path)
+                let filename = Path::new(&query.path)
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy();
 
-                let mime = mime_guess::from_path(&path).first_or_octet_stream();
+                let mime = mime_guess::from_path(&query.path).first_or_octet_stream();
 
                 HttpResponse::Ok()
                     .content_type(mime.as_ref())
@@ -217,18 +231,19 @@ impl VueFinder {
     }
 
     pub async fn preview(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage_name = match data.parse_storage_name_from_path(&query.path) {
+            Some(name) => name,
+            None => return HttpResponse::BadRequest().finish(),
+        };
+
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        match storage.read(&query.path.clone().unwrap_or_default()).await {
+        match storage.read(&query.path).await {
             Ok(contents) => {
-                let mime = mime_guess::from_path(&query.path.clone().unwrap_or_default())
-                    .first_or_octet_stream();
+                let mime = mime_guess::from_path(&query.path).first_or_octet_stream();
 
                 HttpResponse::Ok()
                     .content_type(mime.as_ref())
@@ -238,14 +253,31 @@ impl VueFinder {
         }
     }
 
-    pub async fn search(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
-        let adapter = query.adapter.clone().unwrap_or_default();
-        let storage = match data.storages.get(&adapter) {
-            Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+    pub async fn search(
+        data: web::Data<VueFinder>,
+        query: web::Query<SearchQuery>,
+    ) -> HttpResponse {
+        let storage_name = match data.parse_storage_name_from_path(&query.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format. Path should include storage prefix (e.g., 'local://')."
+                }))
+            }
         };
 
-        let base_path = query.path.clone().unwrap_or_default();
+        let storage = match data.storages.get(&storage_name) {
+            Some(s) => s,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
+        };
+
+        let base_path = query.path.clone();
         let filter = query.filter.clone().unwrap_or_default().to_lowercase();
 
         async fn search_dir(
@@ -284,7 +316,6 @@ impl VueFinder {
         let mut files = Vec::new();
         match search_dir(storage, base_path, &filter, &mut files).await {
             Ok(_) => HttpResponse::Ok().json(json!({
-                "adapter": adapter,
                 "storages": data.storages.keys().collect::<Vec<_>>(),
                 "dirname": query.path,
                 "files": files
@@ -317,10 +348,7 @@ impl VueFinder {
         match storage.create_dir(&new_path).await {
             Ok(_) => {
                 let query = web::Query(Query {
-                    q: "index".to_string(),
-                    adapter: storage_name,
-                    path: Some(payload.path.clone()),
-                    filter: None,
+                    path: payload.path.clone(),
                 });
                 Self::index(data, query).await
             }
@@ -334,27 +362,37 @@ impl VueFinder {
 
     pub async fn new_file(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<NewFileRequest>,
     ) -> HttpResponse {
-        let storage = match data.get_storage(query.adapter.clone()) {
-            Some(s) => s,
+        let storage_name = match data.parse_storage_name_from_path(&payload.path) {
+            Some(name) => name,
             None => {
                 return HttpResponse::BadRequest().json(json!({
                     "status": false,
-                    "message": "No storage adapters available"
+                    "message": "Invalid path format. Path should include storage prefix (e.g., 'local://')."
                 }))
             }
         };
 
-        let new_path = format!(
-            "{}/{}",
-            query.path.clone().unwrap_or_default(),
-            payload.name
-        );
+        let storage = match data.storages.get(&storage_name) {
+            Some(s) => s,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
+        };
+
+        let new_path = format!("{}/{}", payload.path, payload.name);
 
         match storage.write(&new_path, vec![]).await {
-            Ok(_) => Self::index(data, query).await,
+            Ok(_) => {
+                let query = web::Query(Query {
+                    path: payload.path.clone(),
+                });
+                Self::index(data, query).await
+            }
             Err(e) => HttpResponse::InternalServerError().json(json!({
                 "status": false,
                 "message": e.to_string()
@@ -364,40 +402,36 @@ impl VueFinder {
 
     pub async fn rename(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<RenameRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
-            Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+        let storage_name = match data.parse_storage_name_from_path(&payload.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format."
+                }))
+            }
         };
 
-        let new_path = format!(
-            "{}/{}",
-            query.path.clone().unwrap_or_default(),
-            payload.name
-        );
+        let storage = match data.storages.get(&storage_name) {
+            Some(s) => s,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
+        };
 
-        // First read the original file content
-        match storage.read(&payload.item).await {
-            Ok(contents) => {
-                // Write the new file
-                if let Err(e) = storage.write(&new_path, contents).await {
-                    return HttpResponse::InternalServerError().json(json!({
-                        "status": false,
-                        "message": e.to_string()
-                    }));
-                }
-                // Delete the original file
-                if let Err(e) = storage.delete(&payload.item).await {
-                    return HttpResponse::InternalServerError().json(json!({
-                        "status": false,
-                        "message": e.to_string()
-                    }));
-                }
+        let new_path = format!("{}/{}", payload.path, payload.name);
+
+        // Use storage rename which handles both files and directories
+        match storage.rename(&payload.item, &new_path).await {
+            Ok(_) => {
+                let query = web::Query(Query {
+                    path: payload.path.clone(),
+                });
                 Self::index(data, query).await
             }
             Err(e) => HttpResponse::InternalServerError().json(json!({
@@ -409,23 +443,34 @@ impl VueFinder {
 
     pub async fn r#move(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<MoveRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage_name = match data.parse_storage_name_from_path(&payload.destination) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid destination path format."
+                }))
+            }
+        };
+
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
         };
 
         // Check if the target path conflicts with existing files
-        for item in &payload.items {
+        for source in &payload.sources {
             let target = format!(
                 "{}/{}",
-                payload.item,
-                Path::new(&item.path)
+                payload.destination,
+                Path::new(source)
                     .file_name()
                     .unwrap_or_default()
                     .to_str()
@@ -440,11 +485,11 @@ impl VueFinder {
         }
 
         // Execute move operation
-        for item in &payload.items {
+        for source in &payload.sources {
             let target = format!(
                 "{}/{}",
-                payload.item,
-                Path::new(&item.path)
+                payload.destination,
+                Path::new(source)
                     .file_name()
                     .unwrap_or_default()
                     .to_str()
@@ -452,7 +497,7 @@ impl VueFinder {
             );
 
             // Read source file content
-            match storage.read(&item.path).await {
+            match storage.read(source).await {
                 Ok(contents) => {
                     // Write to target location
                     if let Err(e) = storage.write(&target, contents).await {
@@ -462,7 +507,7 @@ impl VueFinder {
                         }));
                     }
                     // Delete source file
-                    if let Err(e) = storage.delete(&item.path).await {
+                    if let Err(e) = storage.delete(source).await {
                         return HttpResponse::InternalServerError().json(json!({
                             "status": false,
                             "message": e.to_string()
@@ -478,20 +523,96 @@ impl VueFinder {
             }
         }
 
+        let query = web::Query(Query {
+            path: payload.path.clone(),
+        });
+        Self::index(data, query).await
+    }
+
+    pub async fn copy(
+        data: web::Data<VueFinder>,
+        payload: web::Json<CopyRequest>,
+    ) -> HttpResponse {
+        let storage_name = match data.parse_storage_name_from_path(&payload.destination) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid destination path format."
+                }))
+            }
+        };
+
+        let storage = match data.storages.get(&storage_name) {
+            Some(s) => s,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
+        };
+
+        // Execute copy operation
+        for source in &payload.sources {
+            let target = format!(
+                "{}/{}",
+                payload.destination,
+                Path::new(source)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap()
+            );
+
+            // Read source file content
+            match storage.read(source).await {
+                Ok(contents) => {
+                    // Write to target location
+                    if let Err(e) = storage.write(&target, contents).await {
+                        return HttpResponse::InternalServerError().json(json!({
+                            "status": false,
+                            "message": e.to_string()
+                        }));
+                    }
+                }
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": e.to_string()
+                    }))
+                }
+            }
+        }
+
+        let query = web::Query(Query {
+            path: payload.path.clone(),
+        });
         Self::index(data, query).await
     }
 
     pub async fn delete(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<DeleteRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage_name = match data.parse_storage_name_from_path(&payload.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format."
+                }))
+            }
+        };
+
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
         };
 
         for item in &payload.items {
@@ -503,40 +624,57 @@ impl VueFinder {
             }
         }
 
+        let query = web::Query(Query {
+            path: payload.path.clone(),
+        });
         Self::index(data, query).await
     }
 
     pub async fn upload(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
-        mut payload: Multipart,
+        payload: MultipartForm<UploadForm>,
     ) -> HttpResponse {
-        let storage = match data.get_storage(query.adapter.clone()) {
-            Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+        let path = payload.path.to_string();
+        let filename = payload.name.to_string();
+        
+        if path.is_empty() {
+            return HttpResponse::BadRequest().json(json!({
+                "status": false,
+                "message": "Missing path in request body."
+            }));
+        }
+
+        let storage_name = match data.parse_storage_name_from_path(&path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format."
+                }))
+            }
         };
 
-        let mut filename = String::new();
-        let mut file_data = Vec::new();
-
-        // Process multipart form fields
-        while let Ok(Some(mut field)) = payload.try_next().await {
-            let content_disposition = field.content_disposition();
-
-            match content_disposition.get_name() {
-                Some("name") => {
-                    if let Ok(Some(chunk)) = field.try_next().await {
-                        filename = String::from_utf8_lossy(&chunk).to_string();
-                    }
-                }
-                Some("file") => {
-                    while let Ok(Some(chunk)) = field.try_next().await {
-                        file_data.extend_from_slice(&chunk);
-                    }
-                }
-                _ => continue,
+        let storage = match data.storages.get(&storage_name) {
+            Some(s) => s,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
             }
-        }
+        };
+
+        // Read file data from TempFile
+        let file_path = payload.file.file.path();
+        let file_data = match std::fs::read(file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(json!({
+                    "status": false,
+                    "message": format!("Failed to read uploaded file: {}", e)
+                }))
+            }
+        };
 
         if filename.is_empty() || file_data.is_empty() {
             return HttpResponse::BadRequest().json(json!({
@@ -546,7 +684,7 @@ impl VueFinder {
         }
 
         // Build file path and save file
-        let filepath = format!("{}/{}", query.path.clone().unwrap_or_default(), filename);
+        let filepath = format!("{}/{}", path, filename);
         if let Err(e) = storage.write(&filepath, file_data).await {
             return HttpResponse::InternalServerError().json(json!({
                 "status": false,
@@ -554,27 +692,37 @@ impl VueFinder {
             }));
         }
 
+        let query = web::Query(Query {
+            path: path.clone(),
+        });
         Self::index(data, query).await
     }
 
     pub async fn archive(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<ArchiveRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
-            Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+        let storage_name = match data.parse_storage_name_from_path(&payload.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format."
+                }))
+            }
         };
 
-        let zip_path = format!(
-            "{}/{}.zip",
-            query.path.clone().unwrap_or_default(),
-            payload.name
-        );
+        let storage = match data.storages.get(&storage_name) {
+            Some(s) => s,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
+        };
+
+        let zip_path = format!("{}/{}.zip", payload.path, payload.name);
 
         // Check if file already exists
         if storage.exists(&zip_path).await.unwrap_or(false) {
@@ -641,20 +789,34 @@ impl VueFinder {
             }));
         }
 
+        let query = web::Query(Query {
+            path: payload.path.clone(),
+        });
         Self::index(data, query).await
     }
 
     pub async fn unarchive(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<UnarchiveRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage_name = match data.parse_storage_name_from_path(&payload.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format."
+                }))
+            }
+        };
+
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
         };
 
         // Read ZIP file
@@ -682,7 +844,7 @@ impl VueFinder {
         // Extract files
         let extract_path = format!(
             "{}/{}",
-            query.path.clone().unwrap_or_default(),
+            payload.path,
             Path::new(&payload.item)
                 .file_stem()
                 .and_then(|n| n.to_str())
@@ -749,30 +911,46 @@ impl VueFinder {
             }
         }
 
+        let query = web::Query(Query {
+            path: payload.path.clone(),
+        });
         Self::index(data, query).await
     }
 
     pub async fn save(
         data: web::Data<VueFinder>,
-        query: web::Query<Query>,
         payload: web::Json<SaveRequest>,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage_name = match data.parse_storage_name_from_path(&payload.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format."
+                }))
+            }
+        };
+
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
-            None => return HttpResponse::BadRequest().finish(),
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid storage adapter"
+                }))
+            }
         };
 
         match storage
-            .write(
-                &query.path.clone().unwrap_or_default(),
-                payload.content.as_bytes().to_vec(),
-            )
+            .write(&payload.path, payload.content.as_bytes().to_vec())
             .await
         {
-            Ok(_) => Self::preview(data, query).await,
+            Ok(_) => {
+                let query = web::Query(Query {
+                    path: payload.path.clone(),
+                });
+                Self::preview(data, query).await
+            }
             Err(e) => HttpResponse::InternalServerError().json(json!({
                 "status": false,
                 "message": e.to_string()
