@@ -24,6 +24,7 @@ pub trait StorageAdapter: Send + Sync {
     async fn delete(&self, path: &str) -> Result<(), StorageError>;
     async fn create_dir(&self, path: &str) -> Result<(), StorageError>;
     async fn exists(&self, path: &str) -> Result<bool, StorageError>;
+    async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), StorageError>;
 }
 
 #[derive(Debug, Serialize)]
