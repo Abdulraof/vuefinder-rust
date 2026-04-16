@@ -778,17 +778,72 @@ impl VueFinder {
             }));
         }
 
-        // Create ZIP file
-        let mut zip_buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut zip_buffer);
-            let mut zip = ZipWriter::new(cursor);
+        async fn add_dir_to_zip(
+            storage: &Arc<dyn StorageAdapter>,
+            zip: &mut ZipWriter<std::io::BufWriter<std::fs::File>>,
+            dir_path: &str,
+            options: FileOptions,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let contents = storage.list_contents(dir_path).await?;
+            for item in contents {
+                let item_path = if dir_path.is_empty() {
+                    item.basename.clone()
+                } else {
+                    format!("{dir_path}/{}", item.basename)
+                };
+                
+                if item.node_type == "dir" {
+                    zip.add_directory(&item_path, options.clone())?;
+                    Box::pin(add_dir_to_zip(storage, zip, &item_path, options.clone())).await?;
+                } else {
+                    let contents = storage.read(&item_path).await?;
+                    zip.start_file(&item_path, options.clone())?;
+                    zip.write_all(&contents)?;
+                }
+            }
+            Ok(())
+        }
 
-            let options = FileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated)
-                .unix_permissions(0o755);
+        // Create ZIP file in temp file to avoid borrow issues
+        let temp_path = std::env::temp_dir().join(format!("vuefinder_archive_{}.zip", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let file = match std::fs::File::create(&temp_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(json!({
+                    "status": false,
+                    "message": format!("Failed to create temp archive file: {}", e)
+                }));
+            }
+        };
+        let buf_writer = std::io::BufWriter::new(file);
+        let mut zip = ZipWriter::new(buf_writer);
 
-            for item in &payload.items {
+        let options = FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o755);
+
+        for item in &payload.items {
+            if item.r#type == "dir" {
+                let dir_name = Path::new(&item.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                
+                if let Err(e) = zip.add_directory(dir_name, options.clone()) {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("Failed to add directory to ZIP: {}", e)
+                    }));
+                }
+                if let Err(e) = Box::pin(add_dir_to_zip(storage, &mut zip, &item.path, options.clone())).await {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("Failed to archive directory contents: {}", e)
+                    }));
+                }
+            } else {
                 match storage.read(&item.path).await {
                     Ok(contents) => {
                         let file_name = Path::new(&item.path)
@@ -796,7 +851,8 @@ impl VueFinder {
                             .and_then(|n| n.to_str())
                             .unwrap_or_default();
 
-                        if let Err(e) = zip.start_file(file_name, options) {
+                        if let Err(e) = zip.start_file(file_name, options.clone()) {
+                            let _ = std::fs::remove_file(&temp_path);
                             return HttpResponse::InternalServerError().json(json!({
                                 "status": false,
                                 "message": format!("Failed to add file to ZIP: {}", e)
@@ -804,6 +860,7 @@ impl VueFinder {
                         }
 
                         if let Err(e) = zip.write_all(&contents) {
+                            let _ = std::fs::remove_file(&temp_path);
                             return HttpResponse::InternalServerError().json(json!({
                                 "status": false,
                                 "message": format!("Failed to write file content: {}", e)
@@ -811,6 +868,7 @@ impl VueFinder {
                         }
                     }
                     Err(e) => {
+                        let _ = std::fs::remove_file(&temp_path);
                         return HttpResponse::InternalServerError().json(json!({
                             "status": false,
                             "message": format!("Failed to read source file: {}", e)
@@ -818,14 +876,26 @@ impl VueFinder {
                     }
                 }
             }
+        }
 
-            if let Err(e) = zip.finish() {
+        if let Err(e) = zip.finish() {
+            let _ = std::fs::remove_file(&temp_path);
+            return HttpResponse::InternalServerError().json(json!({
+                "status": false,
+                "message": format!("Failed to finalize ZIP file: {}", e)
+            }));
+        }
+
+        let zip_buffer = match std::fs::read(&temp_path) {
+            Ok(b) => b,
+            Err(e) => {
                 return HttpResponse::InternalServerError().json(json!({
                     "status": false,
-                    "message": format!("Failed to finalize ZIP file: {}", e)
+                    "message": format!("Failed to read archive: {}", e)
                 }));
             }
-        }
+        };
+        let _ = std::fs::remove_file(&temp_path);
 
         // Save ZIP file
         if let Err(e) = storage.write(&zip_path, zip_buffer).await {
