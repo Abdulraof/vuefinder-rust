@@ -278,7 +278,7 @@ impl VueFinder {
 
         let base_path = query.path.clone();
         let filter = query.filter.clone().unwrap_or_default().to_lowercase();
-        let deep = query.deep.unwrap_or(false);
+        let deep = query.deep.as_ref().map(|b| b.0).unwrap_or(false);
 
         let size_filter = match query.size.as_deref() {
             Some("small") => Some(0..1024),           // < 1KB
