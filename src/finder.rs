@@ -278,42 +278,62 @@ impl VueFinder {
 
         let base_path = query.path.clone();
         let filter = query.filter.clone().unwrap_or_default().to_lowercase();
+        let deep = query.deep.unwrap_or(false);
+
+        let size_filter = match query.size.as_deref() {
+            Some("small") => Some(0..1024),           // < 1KB
+            Some("medium") => Some(1024..1024*1024),  // 1KB - 1MB
+            Some("large") => Some(1024*1024..usize::MAX), // >= 1MB
+            _ => None,                                 // "all" or None
+        };
+
+        fn matches_size(size: Option<u64>, filter: &Option<std::ops::Range<usize>>) -> bool {
+            match (size, filter) {
+                (Some(s), Some(r)) => r.contains(&(s as usize)),
+                (None, Some(_)) => false,
+                _ => true,
+            }
+        }
 
         async fn search_dir(
             storage: &Arc<dyn StorageAdapter>,
             current_path: String,
             filter: &str,
+            deep: bool,
+            size_filter: &Option<std::ops::Range<usize>>,
             results: &mut Vec<FileNode>,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let contents = storage.list_contents(&current_path).await?;
 
             for item in contents {
                 if item.node_type == "file" && item.basename.to_lowercase().contains(filter) {
-                    let dir = if let Some(parent) = Path::new(&item.path).parent() {
-                        parent.to_string_lossy().to_string()
-                    } else {
-                        String::new()
-                    };
+                    if matches_size(item.size, size_filter) {
+                        let dir = if let Some(parent) = Path::new(&item.path).parent() {
+                            parent.to_string_lossy().to_string()
+                        } else {
+                            String::new()
+                        };
 
-                    results.push(FileNode {
-                        storage_item: item,
-                        url: None,
-                        dir: Some(dir),
-                    });
-                } else if item.node_type == "dir" {
+                        results.push(FileNode {
+                            storage_item: item,
+                            url: None,
+                            dir: Some(dir),
+                        });
+                    }
+                } else if item.node_type == "dir" && deep {
                     let sub_path = if current_path.is_empty() {
                         item.basename
                     } else {
-                        format!("{}/{}", current_path, item.basename)
+                        format!("{current_path}/{}", item.basename)
                     };
-                    Box::pin(search_dir(storage, sub_path, filter, results)).await?;
+                    Box::pin(search_dir(storage, sub_path, filter, deep, size_filter, results)).await?;
                 }
             }
             Ok(())
         }
 
         let mut files = Vec::new();
-        match search_dir(storage, base_path, &filter, &mut files).await {
+        match search_dir(storage, base_path, &filter, deep, &size_filter, &mut files).await {
             Ok(_) => HttpResponse::Ok().json(json!({
                 "storages": data.storages.keys().collect::<Vec<_>>(),
                 "dirname": query.path,
