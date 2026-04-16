@@ -89,14 +89,6 @@ impl VueFinder {
         }
     }
 
-    fn get_storage(&self, adapter: Option<String>) -> Option<&Arc<dyn StorageAdapter>> {
-        let adapter = self.get_default_adapter(adapter);
-        self.storages.get(&adapter).or_else(|| {
-            // If the specified adapter is not found, try to get the first available storage
-            self.storages.values().next()
-        })
-    }
-
     pub async fn index(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
         let path = &query.path;
 
@@ -338,14 +330,22 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         payload: web::Json<NewFolderRequest>,
     ) -> HttpResponse {
-        let storage_name = data.parse_storage_name_from_path(&payload.path);
+        let storage_name = match data.parse_storage_name_from_path(&payload.path) {
+            Some(name) => name,
+            None => {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid path format. Path should include storage prefix (e.g., 'local://')."
+                }))
+            }
+        };
 
-        let storage = match data.get_storage(storage_name.clone()) {
+        let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
             None => {
                 return HttpResponse::BadRequest().json(json!({
                     "status": false,
-                    "message": "No storage adapters available"
+                    "message": "Invalid storage adapter"
                 }))
             }
         };
