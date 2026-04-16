@@ -468,6 +468,27 @@ impl VueFinder {
         }
     }
 
+    async fn copy_dir_recursive(
+        source_storage: &Arc<dyn StorageAdapter>,
+        dest_storage: &Arc<dyn StorageAdapter>,
+        source_path: &str,
+        dest_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        dest_storage.create_dir(dest_path).await?;
+        let contents = source_storage.list_contents(source_path).await?;
+        for item in contents {
+            let item_source = format!("{}/{}", source_path, item.basename);
+            let item_dest = format!("{}/{}", dest_path, item.basename);
+            if item.node_type == "dir" {
+                Box::pin(Self::copy_dir_recursive(source_storage, dest_storage, &item_source, &item_dest)).await?;
+            } else {
+                let contents = source_storage.read(&item_source).await?;
+                dest_storage.write(&item_dest, contents).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn r#move(
         data: web::Data<VueFinder>,
         payload: web::Json<MoveRequest>,
@@ -493,11 +514,12 @@ impl VueFinder {
         };
 
         // Check if the target path conflicts with existing files
-        for source in &payload.sources {
+        let items = payload.resolve_items();
+        for item in &items {
             let target = format!(
                 "{}/{}",
                 payload.destination,
-                Path::new(source)
+                Path::new(&item.path)
                     .file_name()
                     .unwrap_or_default()
                     .to_str()
@@ -512,40 +534,71 @@ impl VueFinder {
         }
 
         // Execute move operation
-        for source in &payload.sources {
+        for item in &items {
+            let source_storage_name = match data.parse_storage_name_from_path(&item.path) {
+                Some(name) => name,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source path format."
+                    }))
+                }
+            };
+            let source_storage = match data.storages.get(&source_storage_name) {
+                Some(s) => s,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source storage adapter"
+                    }))
+                }
+            };
+
             let target = format!(
                 "{}/{}",
                 payload.destination,
-                Path::new(source)
+                Path::new(&item.path)
                     .file_name()
                     .unwrap_or_default()
                     .to_str()
                     .unwrap()
             );
 
-            // Read source file content
-            match storage.read(source).await {
-                Ok(contents) => {
-                    // Write to target location
-                    if let Err(e) = storage.write(&target, contents).await {
-                        return HttpResponse::InternalServerError().json(json!({
-                            "status": false,
-                            "message": e.to_string()
-                        }));
-                    }
-                    // Delete source file
-                    if let Err(e) = storage.delete(source).await {
-                        return HttpResponse::InternalServerError().json(json!({
-                            "status": false,
-                            "message": e.to_string()
-                        }));
-                    }
-                }
-                Err(e) => {
+            if item.r#type == "dir" {
+                if let Err(e) = Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
-                        "message": e.to_string()
-                    }))
+                        "message": format!("Failed to move directory: {}", e)
+                    }));
+                }
+                if let Err(e) = source_storage.delete(&item.path).await {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("Failed to delete source directory: {}", e)
+                    }));
+                }
+            } else {
+                match source_storage.read(&item.path).await {
+                    Ok(contents) => {
+                        if let Err(e) = storage.write(&target, contents).await {
+                            return HttpResponse::InternalServerError().json(json!({
+                                "status": false,
+                                "message": e.to_string()
+                            }));
+                        }
+                        if let Err(e) = source_storage.delete(&item.path).await {
+                            return HttpResponse::InternalServerError().json(json!({
+                                "status": false,
+                                "message": e.to_string()
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        return HttpResponse::InternalServerError().json(json!({
+                            "status": false,
+                            "message": e.to_string()
+                        }))
+                    }
                 }
             }
         }
@@ -581,11 +634,12 @@ impl VueFinder {
         };
 
         // Check if the target path conflicts with existing files
-        for source in &payload.sources {
+        let items = payload.resolve_items();
+        for item in &items {
             let target = format!(
                 "{}/{}",
                 payload.destination,
-                Path::new(source)
+                Path::new(&item.path)
                     .file_name()
                     .unwrap_or_default()
                     .to_str()
@@ -600,33 +654,59 @@ impl VueFinder {
         }
 
         // Execute copy operation
-        for source in &payload.sources {
+        for item in &items {
+            let source_storage_name = match data.parse_storage_name_from_path(&item.path) {
+                Some(name) => name,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source path format."
+                    }))
+                }
+            };
+            let source_storage = match data.storages.get(&source_storage_name) {
+                Some(s) => s,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source storage adapter"
+                    }))
+                }
+            };
+
             let target = format!(
                 "{}/{}",
                 payload.destination,
-                Path::new(source)
+                Path::new(&item.path)
                     .file_name()
                     .unwrap_or_default()
                     .to_str()
                     .unwrap()
             );
 
-            // Read source file content
-            match storage.read(source).await {
-                Ok(contents) => {
-                    // Write to target location
-                    if let Err(e) = storage.write(&target, contents).await {
+            if item.r#type == "dir" {
+                if let Err(e) = Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("Failed to copy directory: {}", e)
+                    }));
+                }
+            } else {
+                match source_storage.read(&item.path).await {
+                    Ok(contents) => {
+                        if let Err(e) = storage.write(&target, contents).await {
+                            return HttpResponse::InternalServerError().json(json!({
+                                "status": false,
+                                "message": e.to_string()
+                            }));
+                        }
+                    }
+                    Err(e) => {
                         return HttpResponse::InternalServerError().json(json!({
                             "status": false,
                             "message": e.to_string()
-                        }));
+                        }))
                     }
-                }
-                Err(e) => {
-                    return HttpResponse::InternalServerError().json(json!({
-                        "status": false,
-                        "message": e.to_string()
-                    }))
                 }
             }
         }
