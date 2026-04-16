@@ -7,12 +7,61 @@ pub struct Query {
     pub path: String,
 }
 
+#[derive(Clone)]
+pub struct BoolOrNum(pub bool);
+
+impl<'de> Deserialize<'de> for BoolOrNum {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum BoolOrNumInner {
+            Bool(bool),
+            Str(String),
+        }
+
+        let inner = BoolOrNumInner::deserialize(deserializer)?;
+        match inner {
+            BoolOrNumInner::Bool(b) => Ok(BoolOrNum(b)),
+            BoolOrNumInner::Str(s) => {
+                if s == "1" {
+                    Ok(BoolOrNum(true))
+                } else if s == "0" {
+                    Ok(BoolOrNum(false))
+                } else if s.to_lowercase() == "true" {
+                    Ok(BoolOrNum(true))
+                } else if s.to_lowercase() == "false" {
+                    Ok(BoolOrNum(false))
+                } else {
+                    Err(serde::de::Error::custom("invalid boolean value"))
+                }
+            }
+        }
+    }
+}
+
+impl Default for BoolOrNum {
+    fn default() -> Self {
+        BoolOrNum(false)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SearchQuery {
     pub path: String,
     pub filter: Option<String>,
-    pub deep: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_bool_or_num")]
+    pub deep: Option<BoolOrNum>,
     pub size: Option<String>,
+}
+
+fn deserialize_bool_or_num<'de, D>(deserializer: D) -> Result<Option<BoolOrNum>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<BoolOrNum>::deserialize(deserializer)
 }
 
 #[derive(Deserialize)]
