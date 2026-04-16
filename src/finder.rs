@@ -100,18 +100,21 @@ impl VueFinder {
     pub async fn index(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
         let path = &query.path;
 
-        // Parse storage name from path
-        let storage_name = match data.parse_storage_name_from_path(path) {
-            Some(name) => name,
-            None => {
-                return HttpResponse::BadRequest().json(json!({
-                    "status": false,
-                    "message": "Invalid path format. Path should include storage prefix (e.g., 'local://')."
-                }))
+        let (storage_name, path_to_list) = if path.is_empty() {
+            let default_storage = data.get_default_adapter(None);
+            (default_storage, String::new())
+        } else {
+            match data.parse_storage_name_from_path(path) {
+                Some(name) => (name, path.clone()),
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid path format. Path should include storage prefix (e.g., 'local://')."
+                    }))
+                }
             }
         };
 
-        // Get storage adapter
         let storage = match data.storages.get(&storage_name) {
             Some(s) => s,
             None => {
@@ -122,8 +125,7 @@ impl VueFinder {
             }
         };
 
-        // Get directory contents
-        let list_contents = match storage.list_contents(path).await {
+        let list_contents = match storage.list_contents(&path_to_list).await {
             Ok(contents) => contents,
             Err(e) => {
                 return HttpResponse::InternalServerError().json(json!({
@@ -133,7 +135,6 @@ impl VueFinder {
             }
         };
 
-        // Convert to FileNode
         let files: Vec<FileNode> = list_contents
             .into_iter()
             .map(|item| {
@@ -147,9 +148,15 @@ impl VueFinder {
             })
             .collect();
 
+        let response_path = if path.is_empty() {
+            format!("{}://", storage_name)
+        } else {
+            path.clone()
+        };
+
         HttpResponse::Ok().json(json!({
             "storages": data.storages.keys().collect::<Vec<_>>(),
-            "dirname": path,
+            "dirname": response_path,
             "files": files,
             "read_only": false
         }))
