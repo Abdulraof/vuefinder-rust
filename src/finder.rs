@@ -372,6 +372,13 @@ impl VueFinder {
 
         let new_path = format!("{}/{}", payload.path, payload.name);
 
+        if storage.exists(&new_path).await.unwrap_or(false) {
+            return HttpResponse::BadRequest().json(json!({
+                "status": false,
+                "message": "A file or directory with this name already exists"
+            }));
+        }
+
         match storage.create_dir(&new_path).await {
             Ok(_) => {
                 let query = web::Query(Query {
@@ -412,6 +419,13 @@ impl VueFinder {
         };
 
         let new_path = format!("{}/{}", payload.path, payload.name);
+
+        if storage.exists(&new_path).await.unwrap_or(false) {
+            return HttpResponse::BadRequest().json(json!({
+                "status": false,
+                "message": "A file or directory with this name already exists"
+            }));
+        }
 
         match storage.write(&new_path, vec![]).await {
             Ok(_) => {
