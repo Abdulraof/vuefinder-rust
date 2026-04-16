@@ -45,17 +45,33 @@ impl LocalStorage {
         let canonical_path = if full_path.exists() {
             full_path.canonicalize().map_err(StorageError::Io)?
         } else {
-            // For non-existent paths, canonicalize the parent and then append the filename
-            let parent = full_path.parent().ok_or_else(|| {
-                StorageError::InvalidPath("Invalid path: no parent directory".to_string())
-            })?;
-            let filename = full_path.file_name().ok_or_else(|| {
-                StorageError::InvalidPath("Invalid path: no filename".to_string())
-            })?;
-            parent
-                .canonicalize()
-                .map_err(StorageError::Io)?
-                .join(filename)
+            // For non-existent paths, walk up to find the nearest existing ancestor,
+            // canonicalize it, and append the remaining components.
+            let mut ancestor = full_path.as_path();
+            let mut remaining = Vec::new();
+            loop {
+                if ancestor.exists() {
+                    break;
+                }
+                remaining.push(
+                    ancestor
+                        .file_name()
+                        .ok_or_else(|| {
+                            StorageError::InvalidPath(
+                                "Invalid path: no parent directory".to_string(),
+                            )
+                        })?
+                        .to_owned(),
+                );
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    StorageError::InvalidPath("Invalid path: no parent directory".to_string())
+                })?;
+            }
+            let mut result = ancestor.canonicalize().map_err(StorageError::Io)?;
+            for component in remaining.into_iter().rev() {
+                result = result.join(component);
+            }
+            result
         };
 
         // Get canonical root path
@@ -332,10 +348,7 @@ mod tests {
         assert!(storage.exists("test_dir").await.unwrap());
 
         // Rename directory
-        storage
-            .rename("test_dir", "renamed_dir")
-            .await
-            .unwrap();
+        storage.rename("test_dir", "renamed_dir").await.unwrap();
         assert!(!storage.exists("test_dir").await.unwrap());
         assert!(storage.exists("renamed_dir").await.unwrap());
         assert!(storage.exists("renamed_dir/file.txt").await.unwrap());

@@ -875,23 +875,25 @@ impl VueFinder {
         async fn add_dir_to_zip(
             storage: &Arc<dyn StorageAdapter>,
             zip: &mut ZipWriter<std::io::BufWriter<std::fs::File>>,
-            dir_path: &str,
+            storage_path: &str,
+            zip_path: &str,
             options: FileOptions,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            let contents = storage.list_contents(dir_path).await?;
+            let contents = storage.list_contents(storage_path).await?;
             for item in contents {
-                let item_path = if dir_path.is_empty() {
+                let item_storage_path = format!("{storage_path}/{}", item.basename);
+                let item_zip_path = if zip_path.is_empty() {
                     item.basename.clone()
                 } else {
-                    format!("{dir_path}/{}", item.basename)
+                    format!("{zip_path}/{}", item.basename)
                 };
                 
                 if item.node_type == "dir" {
-                    zip.add_directory(&item_path, options.clone())?;
-                    Box::pin(add_dir_to_zip(storage, zip, &item_path, options.clone())).await?;
+                    zip.add_directory(&item_zip_path, options.clone())?;
+                    Box::pin(add_dir_to_zip(storage, zip, &item_storage_path, &item_zip_path, options.clone())).await?;
                 } else {
-                    let contents = storage.read(&item_path).await?;
-                    zip.start_file(&item_path, options.clone())?;
+                    let contents = storage.read(&item_storage_path).await?;
+                    zip.start_file(&item_zip_path, options.clone())?;
                     zip.write_all(&contents)?;
                 }
             }
@@ -930,7 +932,7 @@ impl VueFinder {
                         "message": format!("Failed to add directory to ZIP: {}", e)
                     }));
                 }
-                if let Err(e) = Box::pin(add_dir_to_zip(storage, &mut zip, &item.path, options.clone())).await {
+                if let Err(e) = Box::pin(add_dir_to_zip(storage, &mut zip, &item.path, dir_name, options.clone())).await {
                     let _ = std::fs::remove_file(&temp_path);
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
