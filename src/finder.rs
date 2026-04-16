@@ -560,6 +560,25 @@ impl VueFinder {
             }
         };
 
+        // Check if the target path conflicts with existing files
+        for source in &payload.sources {
+            let target = format!(
+                "{}/{}",
+                payload.destination,
+                Path::new(source)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap()
+            );
+            if storage.exists(&target).await.unwrap_or(false) {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "One of the files already exists."
+                }));
+            }
+        }
+
         // Execute copy operation
         for source in &payload.sources {
             let target = format!(
