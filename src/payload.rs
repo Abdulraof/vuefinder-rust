@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct Query {
+    #[serde(default)]
     pub path: String,
 }
 
@@ -36,15 +37,51 @@ pub struct RenameRequest {
 #[derive(Deserialize)]
 pub struct MoveRequest {
     pub path: String,
+    #[serde(default)]
+    pub items: Vec<FileItem>,
+    #[serde(default)]
     pub sources: Vec<String>,
     pub destination: String,
+}
+
+impl MoveRequest {
+    pub fn resolve_items(&self) -> Vec<FileItem> {
+        if !self.items.is_empty() {
+            return self.items.clone();
+        }
+        self.sources
+            .iter()
+            .map(|s| FileItem {
+                path: s.clone(),
+                r#type: "file".to_string(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
 pub struct CopyRequest {
     pub path: String,
+    #[serde(default)]
+    pub items: Vec<FileItem>,
+    #[serde(default)]
     pub sources: Vec<String>,
     pub destination: String,
+}
+
+impl CopyRequest {
+    pub fn resolve_items(&self) -> Vec<FileItem> {
+        if !self.items.is_empty() {
+            return self.items.clone();
+        }
+        self.sources
+            .iter()
+            .map(|s| FileItem {
+                path: s.clone(),
+                r#type: "file".to_string(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -72,7 +109,7 @@ pub struct SaveRequest {
     pub content: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct FileItem {
     pub path: String,
     pub r#type: String,
