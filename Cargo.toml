@@ -22,7 +22,6 @@ required-features = ["binary"]
 [features]
 default = ["binary"]
 binary = []
-s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types"]
 
 [dependencies]
 # HTTP & Web
@@ -47,10 +46,10 @@ async-trait = "0.1"
 zip = "0.6"
 mime_guess = "2.0"
 
-# S3 / Compatible storage (optional)
-aws-sdk-s3 = { version = "1", optional = true }
-aws-config = { version = "1", optional = true }
-aws-credential-types = { version = "1", features = ["hardcoded-credentials"], optional = true }
+# S3
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
+aws-config = "1"
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
 
 # Error Handling
 thiserror = "1.0"
@@ -59,6 +58,7 @@ anyhow = "1.0"
 # Logging
 log = "0.4"
 env_logger = "0.10"
+dotenvy = "0.15"
 
 [dev-dependencies]
 tokio-test = "0.4"
