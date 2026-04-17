@@ -877,7 +877,7 @@ impl VueFinder {
             zip: &mut ZipWriter<std::io::BufWriter<std::fs::File>>,
             storage_path: &str,
             zip_path: &str,
-            options: FileOptions,
+            options: FileOptions<'_, ()>,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let contents = storage.list_contents(storage_path).await?;
             for item in contents {
