@@ -5,10 +5,12 @@ use clap::Parser;
 use env_logger::Env;
 use std::sync::Arc;
 
+use std::collections::HashMap;
 use vuefinder::{
     app_config::{VueFinderAppConfig, VueFinderAppExt},
     finder::VueFinderConfig,
-    storages::local::LocalStorage,
+    storages::{local::LocalStorage, StorageAdapter},
+    S3Config, S3Storage,
 };
 
 #[derive(Parser)]
@@ -33,6 +35,8 @@ struct Args {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenvy::dotenv().ok();
+
     let args = Args::parse();
 
     env_logger::init_from_env(Env::default().default_filter_or("info"));
@@ -42,8 +46,23 @@ async fn main() -> std::io::Result<()> {
 
     let config = VueFinderConfig::from_file(&args.config).unwrap_or_default();
 
+    let mut storages: HashMap<String, Arc<dyn StorageAdapter>> = HashMap::new();
+
+    let local = Arc::new(LocalStorage::new(&args.local_storage)) as Arc<dyn StorageAdapter>;
+    storages.insert(local.name(), local);
+
+    let s3 = Arc::new(S3Storage::new(S3Config {
+        bucket: std::env::var("S3_BUCKET").unwrap_or_default(),
+        region: std::env::var("S3_REGION").unwrap_or_else(|_| "auto".into()),
+        access_key_id: std::env::var("S3_ACCESS_KEY_ID").unwrap_or_default(),
+        secret_access_key: std::env::var("S3_SECRET_ACCESS_KEY").unwrap_or_default(),
+        endpoint_url: std::env::var("S3_ENDPOINT_URL").ok(),
+        prefix: std::env::var("S3_PREFIX").ok(),
+    }).await) as Arc<dyn StorageAdapter>;
+    storages.insert(s3.name(), s3);
+
     let app_config = VueFinderAppConfig {
-        storages: LocalStorage::setup(&args.local_storage),
+        storages: Arc::new(storages),
         finder_config: Arc::new(config),
         ..VueFinderAppConfig::default()
     };
