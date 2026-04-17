@@ -6,3 +6,6 @@ pub mod storages;
 
 pub use finder::{VueFinder, VueFinderConfig};
 pub use storages::{StorageAdapter, StorageItem};
+
+#[cfg(feature = "s3")]
+pub use storages::s3::{S3Config, S3Storage};
