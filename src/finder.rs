@@ -528,7 +528,25 @@ impl VueFinder {
         };
 
         // Check if the target path conflicts with existing files
-        let items = payload.resolve_items();
+        let mut items = payload.resolve_items();
+        
+        // For sources without explicit type, check if they're directories
+        for item in &mut items {
+            if item.r#type != "dir" {
+                let source_storage_name = match data.parse_storage_name_from_path(&item.path) {
+                    Some(name) => name,
+                    None => continue,
+                };
+                let source_storage = match data.storages.get(&source_storage_name) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let Ok(true) = source_storage.exists(&format!("{}/", item.path)).await {
+                    item.r#type = "dir".to_string();
+                }
+            }
+        }
+        
         for item in &items {
             let target = format!(
                 "{}/{}",
@@ -648,7 +666,25 @@ impl VueFinder {
         };
 
         // Check if the target path conflicts with existing files
-        let items = payload.resolve_items();
+        let mut items = payload.resolve_items();
+        
+        // For sources without explicit type, check if they're directories
+        for item in &mut items {
+            if item.r#type != "dir" {
+                let source_storage_name = match data.parse_storage_name_from_path(&item.path) {
+                    Some(name) => name,
+                    None => continue,
+                };
+                let source_storage = match data.storages.get(&source_storage_name) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let Ok(true) = source_storage.exists(&format!("{}/", item.path)).await {
+                    item.r#type = "dir".to_string();
+                }
+            }
+        }
+        
         for item in &items {
             let target = format!(
                 "{}/{}",
