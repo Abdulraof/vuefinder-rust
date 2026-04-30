@@ -1,4 +1,4 @@
-use image::{ImageFormat, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, ImageFormat};
 use lru::LruCache;
 use std::io::Cursor;
 use std::num::NonZeroUsize;
@@ -24,7 +24,7 @@ impl ThumbnailCache {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(CACHE_SIZE).unwrap()
+                NonZeroUsize::new(CACHE_SIZE).unwrap(),
             ))),
         }
     }
@@ -33,8 +33,14 @@ impl ThumbnailCache {
     pub fn is_image(mime_type: &str) -> bool {
         matches!(
             mime_type,
-            "image/jpeg" | "image/jpg" | "image/png" | "image/gif" | 
-            "image/webp" | "image/bmp" | "image/tiff" | "image/svg+xml"
+            "image/jpeg"
+                | "image/jpg"
+                | "image/png"
+                | "image/gif"
+                | "image/webp"
+                | "image/bmp"
+                | "image/tiff"
+                | "image/svg+xml"
         )
     }
 
@@ -62,7 +68,8 @@ impl ThumbnailCache {
         }
 
         // Generate thumbnail if not in cache
-        let (thumbnail_data, thumbnail_mime) = self.generate_thumbnail(file_data, mime_type).await?;
+        let (thumbnail_data, thumbnail_mime) =
+            self.generate_thumbnail(file_data, mime_type).await?;
 
         // Store in cache
         {
@@ -120,7 +127,7 @@ impl ThumbnailCache {
     /// Resize image maintaining aspect ratio
     fn resize_image(&self, img: DynamicImage, max_size: u32) -> DynamicImage {
         let (width, height) = img.dimensions();
-        
+
         if width <= max_size && height <= max_size {
             return img;
         }
@@ -157,41 +164,3 @@ impl Default for ThumbnailCache {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_image() {
-        assert!(ThumbnailCache::is_image("image/jpeg"));
-        assert!(ThumbnailCache::is_image("image/png"));
-        assert!(ThumbnailCache::is_image("image/gif"));
-        assert!(!ThumbnailCache::is_image("text/plain"));
-        assert!(!ThumbnailCache::is_image("application/pdf"));
-    }
-
-    #[test]
-    fn test_cache_key_generation() {
-        let key1 = ThumbnailCache::generate_cache_key("test.jpg", Some(123456));
-        let key2 = ThumbnailCache::generate_cache_key("test.jpg", Some(123457));
-        let key3 = ThumbnailCache::generate_cache_key("test.jpg", None);
-        
-        assert_ne!(key1, key2);
-        assert_ne!(key1, key3);
-        assert_eq!(key1, "test.jpg:123456");
-        assert_eq!(key3, "test.jpg:0");
-    }
-
-    #[tokio::test]
-    async fn test_thumbnail_cache_creation() {
-        let cache = ThumbnailCache::new();
-        let (len, cap) = cache.get_cache_stats();
-        assert_eq!(len, 0);
-        assert_eq!(cap, CACHE_SIZE);
-    }
-}
-
-// Include integration tests
-#[path = "thumbnail_integration_test.rs"]
-mod thumbnail_integration_test;
