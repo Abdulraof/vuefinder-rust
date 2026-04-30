@@ -15,6 +15,7 @@ use crate::payload::{
 };
 use crate::storages::StorageAdapter;
 use crate::storages::StorageItem;
+use crate::thumbnail::ThumbnailCache;
 
 // Default configuration functions
 #[derive(Clone, Debug, Deserialize)]
@@ -49,10 +50,16 @@ struct FileNode {
 pub struct VueFinder {
     pub storages: Arc<std::collections::HashMap<String, Arc<dyn StorageAdapter>>>,
     pub config: Arc<VueFinderConfig>,
+    pub thumbnail_cache: ThumbnailCache,
 }
 
 // Request handling functions
 impl VueFinder {
+    /// Get thumbnail cache statistics
+    pub fn get_cache_stats(&self) -> (usize, usize) {
+        self.thumbnail_cache.get_cache_stats()
+    }
+
     fn get_default_adapter(&self, adapter: Option<String>) -> String {
         // If adapter is empty, return the first available adapter
         if let Some(adapter) = adapter {
@@ -243,7 +250,42 @@ impl VueFinder {
         match storage.read(&query.path).await {
             Ok(contents) => {
                 let mime = mime_guess::from_path(&query.path).first_or_octet_stream();
+                let mime_str = mime.essence_str();
 
+                // Check if thumbnail is requested and this is an image
+                let should_generate_thumbnail =
+                    query.thumbnail != "false" && ThumbnailCache::is_image(mime_str);
+
+                if should_generate_thumbnail {
+                    // Get file metadata for cache key
+                    let last_modified = if let Ok(items) = storage.list_contents(&query.path).await
+                    {
+                        items.first().and_then(|item| item.last_modified)
+                    } else {
+                        None
+                    };
+
+                    // Try to get thumbnail from cache or generate it
+                    match data
+                        .thumbnail_cache
+                        .get_thumbnail(&query.path, &contents, mime_str, last_modified)
+                        .await
+                    {
+                        Ok((thumbnail_data, thumbnail_mime)) => {
+                            return HttpResponse::Ok()
+                                .content_type(thumbnail_mime)
+                                .append_header(("Cache-Control", "public, max-age=3600"))
+                                .append_header(("X-Thumbnail", "true"))
+                                .body(thumbnail_data);
+                        }
+                        Err(e) => {
+                            // If thumbnail generation fails, fall back to original image
+                            log::warn!("Failed to generate thumbnail for {}: {}", query.path, e);
+                        }
+                    }
+                }
+
+                // Return original content for non-images or if thumbnail generation failed
                 HttpResponse::Ok()
                     .content_type(mime.as_ref())
                     .body(contents)
@@ -281,10 +323,10 @@ impl VueFinder {
         let deep = query.deep.as_ref().map(|b| b.0).unwrap_or(false);
 
         let size_filter = match query.size.as_deref() {
-            Some("small") => Some(0..1024),           // < 1KB
-            Some("medium") => Some(1024..1024*1024),  // 1KB - 1MB
-            Some("large") => Some(1024*1024..usize::MAX), // >= 1MB
-            _ => None,                                 // "all" or None
+            Some("small") => Some(0..1024),                 // < 1KB
+            Some("medium") => Some(1024..1024 * 1024),      // 1KB - 1MB
+            Some("large") => Some(1024 * 1024..usize::MAX), // >= 1MB
+            _ => None,                                      // "all" or None
         };
 
         fn matches_size(size: Option<u64>, filter: &Option<std::ops::Range<usize>>) -> bool {
@@ -326,7 +368,15 @@ impl VueFinder {
                     } else {
                         format!("{current_path}/{}", item.basename)
                     };
-                    Box::pin(search_dir(storage, sub_path, filter, deep, size_filter, results)).await?;
+                    Box::pin(search_dir(
+                        storage,
+                        sub_path,
+                        filter,
+                        deep,
+                        size_filter,
+                        results,
+                    ))
+                    .await?;
                 }
             }
             Ok(())
@@ -383,6 +433,7 @@ impl VueFinder {
             Ok(_) => {
                 let query = web::Query(Query {
                     path: payload.path.clone(),
+                    thumbnail: "true".to_string(),
                 });
                 Self::index(data, query).await
             }
@@ -431,6 +482,7 @@ impl VueFinder {
             Ok(_) => {
                 let query = web::Query(Query {
                     path: payload.path.clone(),
+                    thumbnail: "true".to_string(),
                 });
                 Self::index(data, query).await
             }
@@ -472,6 +524,7 @@ impl VueFinder {
             Ok(_) => {
                 let query = web::Query(Query {
                     path: payload.path.clone(),
+                    thumbnail: "true".to_string(),
                 });
                 Self::index(data, query).await
             }
@@ -494,7 +547,13 @@ impl VueFinder {
             let item_source = format!("{}/{}", source_path, item.basename);
             let item_dest = format!("{}/{}", dest_path, item.basename);
             if item.node_type == "dir" {
-                Box::pin(Self::copy_dir_recursive(source_storage, dest_storage, &item_source, &item_dest)).await?;
+                Box::pin(Self::copy_dir_recursive(
+                    source_storage,
+                    dest_storage,
+                    &item_source,
+                    &item_dest,
+                ))
+                .await?;
             } else {
                 let contents = source_storage.read(&item_source).await?;
                 dest_storage.write(&item_dest, contents).await?;
@@ -529,7 +588,7 @@ impl VueFinder {
 
         // Check if the target path conflicts with existing files
         let mut items = payload.resolve_items();
-        
+
         // For sources without explicit type, check if they're directories
         for item in &mut items {
             if item.r#type != "dir" {
@@ -546,7 +605,7 @@ impl VueFinder {
                 }
             }
         }
-        
+
         for item in &items {
             let target = format!(
                 "{}/{}",
@@ -597,7 +656,9 @@ impl VueFinder {
             );
 
             if item.r#type == "dir" {
-                if let Err(e) = Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await {
+                if let Err(e) =
+                    Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await
+                {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
                         "message": format!("Failed to move directory: {}", e)
@@ -637,14 +698,12 @@ impl VueFinder {
 
         let query = web::Query(Query {
             path: payload.path.clone(),
+            thumbnail: "true".to_string(),
         });
         Self::index(data, query).await
     }
 
-    pub async fn copy(
-        data: web::Data<VueFinder>,
-        payload: web::Json<CopyRequest>,
-    ) -> HttpResponse {
+    pub async fn copy(data: web::Data<VueFinder>, payload: web::Json<CopyRequest>) -> HttpResponse {
         let storage_name = match data.parse_storage_name_from_path(&payload.destination) {
             Some(name) => name,
             None => {
@@ -667,7 +726,7 @@ impl VueFinder {
 
         // Check if the target path conflicts with existing files
         let mut items = payload.resolve_items();
-        
+
         // For sources without explicit type, check if they're directories
         for item in &mut items {
             if item.r#type != "dir" {
@@ -684,7 +743,7 @@ impl VueFinder {
                 }
             }
         }
-        
+
         for item in &items {
             let target = format!(
                 "{}/{}",
@@ -735,7 +794,9 @@ impl VueFinder {
             );
 
             if item.r#type == "dir" {
-                if let Err(e) = Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await {
+                if let Err(e) =
+                    Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await
+                {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
                         "message": format!("Failed to copy directory: {}", e)
@@ -763,6 +824,7 @@ impl VueFinder {
 
         let query = web::Query(Query {
             path: payload.path.clone(),
+            thumbnail: "true".to_string(),
         });
         Self::index(data, query).await
     }
@@ -802,6 +864,7 @@ impl VueFinder {
 
         let query = web::Query(Query {
             path: payload.path.clone(),
+            thumbnail: "true".to_string(),
         });
         Self::index(data, query).await
     }
@@ -812,7 +875,7 @@ impl VueFinder {
     ) -> HttpResponse {
         let path = payload.path.to_string();
         let filename = payload.name.to_string();
-        
+
         if path.is_empty() {
             return HttpResponse::BadRequest().json(json!({
                 "status": false,
@@ -870,6 +933,7 @@ impl VueFinder {
 
         let query = web::Query(Query {
             path: path.clone(),
+            thumbnail: "true".to_string(),
         });
         Self::index(data, query).await
     }
@@ -923,10 +987,17 @@ impl VueFinder {
                 } else {
                     format!("{zip_path}/{}", item.basename)
                 };
-                
+
                 if item.node_type == "dir" {
                     zip.add_directory(&item_zip_path, options.clone())?;
-                    Box::pin(add_dir_to_zip(storage, zip, &item_storage_path, &item_zip_path, options.clone())).await?;
+                    Box::pin(add_dir_to_zip(
+                        storage,
+                        zip,
+                        &item_storage_path,
+                        &item_zip_path,
+                        options.clone(),
+                    ))
+                    .await?;
                 } else {
                     let contents = storage.read(&item_storage_path).await?;
                     zip.start_file(&item_zip_path, options.clone())?;
@@ -937,7 +1008,13 @@ impl VueFinder {
         }
 
         // Create ZIP file in temp file to avoid borrow issues
-        let temp_path = std::env::temp_dir().join(format!("vuefinder_archive_{}.zip", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_path = std::env::temp_dir().join(format!(
+            "vuefinder_archive_{}.zip",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let file = match std::fs::File::create(&temp_path) {
             Ok(f) => f,
             Err(e) => {
@@ -960,7 +1037,7 @@ impl VueFinder {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_default();
-                
+
                 if let Err(e) = zip.add_directory(dir_name, options.clone()) {
                     let _ = std::fs::remove_file(&temp_path);
                     return HttpResponse::InternalServerError().json(json!({
@@ -968,7 +1045,15 @@ impl VueFinder {
                         "message": format!("Failed to add directory to ZIP: {}", e)
                     }));
                 }
-                if let Err(e) = Box::pin(add_dir_to_zip(storage, &mut zip, &item.path, dir_name, options.clone())).await {
+                if let Err(e) = Box::pin(add_dir_to_zip(
+                    storage,
+                    &mut zip,
+                    &item.path,
+                    dir_name,
+                    options.clone(),
+                ))
+                .await
+                {
                     let _ = std::fs::remove_file(&temp_path);
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
@@ -1039,6 +1124,7 @@ impl VueFinder {
 
         let query = web::Query(Query {
             path: payload.path.clone(),
+            thumbnail: "true".to_string(),
         });
         Self::index(data, query).await
     }
@@ -1161,14 +1247,12 @@ impl VueFinder {
 
         let query = web::Query(Query {
             path: payload.path.clone(),
+            thumbnail: "true".to_string(),
         });
         Self::index(data, query).await
     }
 
-    pub async fn save(
-        data: web::Data<VueFinder>,
-        payload: web::Json<SaveRequest>,
-    ) -> HttpResponse {
+    pub async fn save(data: web::Data<VueFinder>, payload: web::Json<SaveRequest>) -> HttpResponse {
         let storage_name = match data.parse_storage_name_from_path(&payload.path) {
             Some(name) => name,
             None => {
@@ -1196,6 +1280,7 @@ impl VueFinder {
             Ok(_) => {
                 let query = web::Query(Query {
                     path: payload.path.clone(),
+                    thumbnail: "true".to_string(),
                 });
                 Self::preview(data, query).await
             }
