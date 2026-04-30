@@ -46,6 +46,12 @@ async-trait = "0.1"
 zip = "0.6"
 mime_guess = "2.0"
 
+# Image Processing
+image = { version = "0.24", features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+
+# Caching
+lru = "0.12"
+
 # S3
 aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
 aws-config = "1"
