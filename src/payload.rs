@@ -5,6 +5,12 @@ use serde::Deserialize;
 pub struct Query {
     #[serde(default)]
     pub path: String,
+    #[serde(default = "default_thumbnail")]
+    pub thumbnail: String,
+}
+
+fn default_thumbnail() -> String {
+    "true".to_string()
 }
 
 #[derive(Clone)]
