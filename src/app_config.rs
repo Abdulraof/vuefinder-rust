@@ -10,6 +10,7 @@ use crate::router::{
     save_handler, search_handler, unarchive_handler, upload_handler,
 };
 use crate::storages::StorageAdapter;
+use crate::thumbnail::ThumbnailCache;
 
 #[derive(Clone)]
 pub struct VueFinderAppConfig {
@@ -44,6 +45,7 @@ where
         let vue_finder = web::Data::new(VueFinder {
             storages: config.storages,
             config: config.finder_config,
+            thumbnail_cache: ThumbnailCache::new(),
         });
 
         self.app_data(web::JsonConfig::default().limit(config.json_limit))
