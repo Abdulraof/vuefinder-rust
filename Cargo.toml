@@ -47,7 +47,14 @@ zip = "8.6.0"
 mime_guess = "2.0"
 
 # Image Processing
-image = { version = "0.25.10", features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+image = { version = "0.25.10", features = [
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+    "bmp",
+    "tiff",
+] }
 
 # Caching
 lru = "0.18.0"
@@ -55,7 +62,9 @@ lru = "0.18.0"
 # S3
 aws-sdk-s3 = { version = "1.131.0", features = ["behavior-version-latest"] }
 aws-config = "1"
-aws-credential-types = { version = "1.2.14", features = ["hardcoded-credentials"] }
+aws-credential-types = { version = "1.2.14", features = [
+    "hardcoded-credentials",
+] }
 
 # Error Handling
 thiserror = "2.0.18"
