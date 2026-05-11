@@ -247,28 +247,38 @@ impl VueFinder {
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        match storage.read(&query.path).await {
-            Ok(contents) => {
-                let mime = mime_guess::from_path(&query.path).first_or_octet_stream();
-                let mime_str = mime.essence_str();
+        let mime = mime_guess::from_path(&query.path).first_or_octet_stream();
+        let mime_str = mime.essence_str();
 
-                // Check if thumbnail is requested and this is an image
-                let should_generate_thumbnail =
-                    query.thumbnail != "false" && ThumbnailCache::is_image(mime_str);
+        // Check if thumbnail is requested and this is an image
+        let should_generate_thumbnail =
+            query.thumbnail != "false" && ThumbnailCache::is_image(mime_str);
 
-                if should_generate_thumbnail {
-                    // Get file metadata for cache key
-                    let last_modified = if let Ok(items) = storage.list_contents(&query.path).await
-                    {
-                        items.first().and_then(|item| item.last_modified)
-                    } else {
-                        None
-                    };
+        if should_generate_thumbnail {
+            // For thumbnails, use a simple hash of the path as cache key
+            // This avoids expensive metadata lookups
+            let cache_key = format!("{}:0", query.path);
+            
+            // Check cache first before reading the file
+            {
+                let mut cache = data.thumbnail_cache.cache.lock().unwrap();
+                if let Some(cached) = cache.get(&cache_key) {
+                    return HttpResponse::Ok()
+                        .content_type(cached.mime_type.as_str())
+                        .append_header(("Cache-Control", "public, max-age=3600"))
+                        .append_header(("X-Thumbnail", "true"))
+                        .append_header(("X-Cache", "HIT"))
+                        .body(cached.data.clone());
+                }
+            }
 
+            // Cache miss - read file and generate thumbnail
+            match storage.read(&query.path).await {
+                Ok(contents) => {
                     // Try to get thumbnail from cache or generate it
                     match data
                         .thumbnail_cache
-                        .get_thumbnail(&query.path, &contents, mime_str, last_modified)
+                        .get_thumbnail(&query.path, &contents, mime_str, None)
                         .await
                     {
                         Ok((thumbnail_data, thumbnail_mime)) => {
@@ -276,20 +286,27 @@ impl VueFinder {
                                 .content_type(thumbnail_mime)
                                 .append_header(("Cache-Control", "public, max-age=3600"))
                                 .append_header(("X-Thumbnail", "true"))
+                                .append_header(("X-Cache", "MISS"))
                                 .body(thumbnail_data);
                         }
                         Err(e) => {
-                            // If thumbnail generation fails, fall back to original image
                             log::warn!("Failed to generate thumbnail for {}: {}", query.path, e);
+                            // Fall through to return original
+                            return HttpResponse::Ok()
+                                .content_type(mime.as_ref())
+                                .body(contents);
                         }
                     }
                 }
-
-                // Return original content for non-images or if thumbnail generation failed
-                HttpResponse::Ok()
-                    .content_type(mime.as_ref())
-                    .body(contents)
+                Err(_) => return HttpResponse::NotFound().finish(),
             }
+        }
+
+        // Non-image or thumbnail disabled - return original
+        match storage.read(&query.path).await {
+            Ok(contents) => HttpResponse::Ok()
+                .content_type(mime.as_ref())
+                .body(contents),
             Err(_) => HttpResponse::NotFound().finish(),
         }
     }
